@@ -37,10 +37,10 @@ class TestAdapter implements PlatformAdapter {
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 const fixtures: { app: Awaited<ReturnType<typeof createApp>>['app']; dir: string }[] = [];
 afterEach(async () => { for (const item of fixtures.splice(0)) { await item.app.close(); assert.ok(item.dir.startsWith(join(tmpdir(), 'ilinker-test-'))); await rm(item.dir, { recursive: true, force: true }); } });
-async function fixture(workers = false, imageDownloader?: ImageDownloader) {
+async function fixture(workers = false, imageDownloader?: ImageDownloader, publicOrigin?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'ilinker-test-'));
   const adapter = new TestAdapter();
-  const result = await createApp({ dataDir: dir, adapter, imageDownloader, startWorkers: workers, webDir: join(dir, 'no-web') });
+  const result = await createApp({ dataDir: dir, adapter, imageDownloader, publicOrigin, startWorkers: workers, webDir: join(dir, 'no-web') });
   fixtures.push({ app: result.app, dir });
   const session = 'test-admin-session';
   result.store.run('INSERT INTO admins VALUES (1,?,?)', 'admin', await passwordHash('correct-password-123'));
@@ -92,6 +92,48 @@ test('protected routes require login and cross-origin writes are rejected', asyn
   assert.equal((await f.request('POST', '/api/v1/auth/logout')).statusCode, 200);
   assert.equal((await f.request('GET', '/api/v1/auth/me')).statusCode, 401);
 });
+test('same-origin browser requests support setup and login behind an HTTPS proxy without a public origin', async () => {
+  const f = await fixture(); f.store.run('DELETE FROM admins');
+  const headers = { host: 'ilinker:3000', origin: 'https://notify.example.com', 'sec-fetch-site': 'same-origin' };
+  const payload = { username: 'owner', password: 'very-good-password' };
+  const setup = await f.app.inject({ method: 'POST', url: '/api/v1/auth/setup', headers, payload });
+  assert.equal(setup.statusCode, 201);
+  const login = await f.app.inject({ method: 'POST', url: '/api/v1/auth/login', headers, payload });
+  assert.equal(login.statusCode, 200);
+  const createBot = (cookie?: string) => f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...headers, ...(cookie ? { cookie } : {}) }, payload: { name: 'proxy bot' } });
+  assert.equal((await createBot()).statusCode, 401);
+  assert.equal((await createBot(`ilinker_session=${login.cookies[0].value}`)).statusCode, 201);
+});
+
+test('cross-site and unverified mismatched origins remain blocked while direct HTTP still works', async () => {
+  const f = await fixture();
+  const rejectedHeaders: Record<string, string>[] = [
+    { origin: 'https://attacker.example' },
+    { origin: 'https://attacker.example', 'sec-fetch-site': 'same-site' },
+    { origin: 'https://attacker.example', 'sec-fetch-site': 'cross-site' },
+    { 'sec-fetch-site': 'cross-site' },
+    { origin: 'null', 'sec-fetch-site': 'same-origin' },
+    { origin: 'https://attacker.example', 'x-forwarded-host': 'attacker.example', 'x-forwarded-proto': 'https' },
+    { origin: 'http://localhost:80', 'sec-fetch-site': 'cross-site' },
+  ];
+  for (const headers of rejectedHeaders) {
+    const response = await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...f.headers, ...headers }, payload: { name: 'blocked' } });
+    assert.equal(response.statusCode, 403, JSON.stringify(headers));
+    assert.equal(response.json().code, 'INVALID_ORIGIN');
+  }
+  const direct = await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...f.headers, host: '192.168.0.10:3000', origin: 'http://192.168.0.10:3000' }, payload: { name: 'direct HTTP' } });
+  assert.equal(direct.statusCode, 201);
+});
+
+test('a configured public origin is enforced even for same-origin browser requests', async () => {
+  const f = await fixture(false, undefined, 'https://notify.example.com');
+  const headers = { ...f.headers, host: 'ilinker:3000', 'sec-fetch-site': 'same-origin' };
+  const wrong = await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...headers, origin: 'https://other.example.com' }, payload: { name: 'blocked' } });
+  assert.equal(wrong.statusCode, 403);
+  const valid = await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...headers, origin: 'https://notify.example.com' }, payload: { name: 'configured origin' } });
+  assert.equal(valid.statusCode, 201);
+});
+
 test('changing password revokes all sessions and requires the current password', async () => {
   const f = await fixture();
   assert.equal((await f.request('PATCH', '/api/v1/auth/password', { currentPassword: 'wrong', newPassword: 'new-password-123' })).statusCode, 400);

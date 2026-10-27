@@ -56,7 +56,9 @@ docker compose logs --tail=100 ilinker
 Compose 自动从 `.env` 读取 `PUBLIC_ORIGIN`、`COOKIE_SECURE` 和 `ENCRYPTION_KEY`；容器内的 `HOST`、`PORT`、`DATA_DIR` 由 `compose.yaml` 固定。
 需要限制宿主机绑定 IP 或更换端口时，直接修改 `compose.yaml` 的 `ports`，例如 `192.168.0.10:3000:3000` 或 `3001:3000`，
 同时更新 `PUBLIC_ORIGIN`。
-HTTPS 反向代理部署时将 `PUBLIC_ORIGIN` 设置为公网 HTTPS 源地址，并设置 `COOKIE_SECURE=true`。
+HTTPS 反向代理部署时，未设置 `PUBLIC_ORIGIN` 也允许浏览器明确标记为同源的请求；设置后则严格匹配该地址。
+如果浏览器未发送 `Sec-Fetch-Site: same-origin`，仍会根据后端收到的协议和 Host 校验，此时应设置 `PUBLIC_ORIGIN` 为实际访问地址。
+HTTPS 部署可设置 `PUBLIC_ORIGIN=https://你的域名` 自动启用安全 Cookie；不设置时请单独设置 `COOKIE_SECURE=true`。
 
 镜像内置 `/healthz` 健康检查。Docker 构建上下文排除了本机 `.env`、数据库、密钥、测试数据和 `node_modules`；
 新容器使用独立的数据卷。每个数据卷只运行一个网关服务实例。
@@ -314,17 +316,18 @@ Token 只能查询由自身 WebHook 创建的消息。
 | `HOST` | `127.0.0.1` | 监听地址 |
 | `PORT` | `3000` | 后端 / 生产前端端口 |
 | `DATA_DIR` | `./data` | SQLite 数据库与本地加密密钥目录 |
-| `PUBLIC_ORIGIN` | 无 | 对外访问源，例如 `https://notify.example.com`；配置后参与后台来源校验 |
+| `PUBLIC_ORIGIN` | 无 | 可选对外访问源，例如 `https://notify.example.com`；配置后严格校验后台请求来源 |
 | `COOKIE_SECURE` | 根据 PUBLIC_ORIGIN 推断 | HTTPS 部署使用 `true` |
 | `ENCRYPTION_KEY` | 自动生成并保存在数据目录 | 可选 Base64 编码的 32 字节密钥 |
 
 反向代理需转发 `/api/`、`/webhook/` 及静态资源；SSE 路径 `/api/v1/events` 应关闭缓冲。
 发送 Base64 图片时，反向代理请求体大小上限应至少设置为 12 MB。
-后台使用 HttpOnly、SameSite=Strict Cookie，并校验写请求 Origin；密码使用 scrypt；微信凭证和会话上下文使用 AES-256-GCM 加密。
+后台使用 HttpOnly、SameSite=Strict Cookie，并校验写请求来源；未配置 `PUBLIC_ORIGIN` 时允许浏览器明确标记为同源的请求，跨站请求仍会被拒绝。
+密码使用 scrypt；微信凭证和会话上下文使用 AES-256-GCM 加密。
 
 完整 WebHook Token 只在创建或重置时返回，数据库只保存摘要。重置立即使旧地址失效。
 应用未启用原始请求 URL 日志；反向代理访问日志也应对 `/webhook/message/` 后的 Token 脱敏。
-对外提供服务前先在本地完成管理员初始化，并配置 HTTPS 与 PUBLIC_ORIGIN。
+对外提供服务前先在本地完成管理员初始化，并配置 HTTPS 和安全 Cookie；可通过 `PUBLIC_ORIGIN` 固定允许的访问源。
 
 备份时保存整个 `DATA_DIR`；使用外部 ENCRYPTION_KEY 时另行备份该密钥。丢失密钥将无法恢复微信凭证和会话上下文。
 启用连接的机器人会在网关重启后自动恢复；明确失效的授权需要重新扫码。

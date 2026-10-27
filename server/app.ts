@@ -60,10 +60,14 @@ export async function createApp(options: AppOptions) {
     if (!path.startsWith('/api/')) return;
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       const origin = request.headers.origin;
-      if (origin) {
+      const fetchSite = request.headers['sec-fetch-site'];
+      if (fetchSite === 'cross-site') throw new AppError(403, 'INVALID_ORIGIN', '不允许跨站请求');
+      // Browser-provided fetch metadata survives HTTPS termination and Host rewrites.
+      const browserSameOrigin = !publicOrigin && origin !== 'null' && fetchSite === 'same-origin';
+      if (origin && !browserSameOrigin) {
         const expected = publicOrigin || `${request.protocol}://${request.headers.host}`;
         if (origin !== expected) throw new AppError(403, 'INVALID_ORIGIN', '请求来源不匹配');
-      } else if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'INVALID_ORIGIN', '不允许跨站请求');
+      }
     }
     const publicPaths = ['/api/v1/auth/status', '/api/v1/auth/setup', '/api/v1/auth/login'];
     const localCli = options.localCliToken &&
