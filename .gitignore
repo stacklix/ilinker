@@ -1,0 +1,11 @@
+node_modules/
+.npm-cache/
+dist/
+data/
+.env
+.env.*
+!.env.example
+!.env.docker.example
+cli-session.json
+*.log
+test-results/

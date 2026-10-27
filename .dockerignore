@@ -1,0 +1,14 @@
+node_modules
+dist
+data
+test-results
+.git
+.codex
+.agents
+.env
+.env.*
+*.log
+*.sqlite*
+*.key
+**/cli-session.json
+server/*.test.ts

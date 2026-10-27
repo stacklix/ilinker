@@ -1,0 +1,21 @@
+services:
+  ilinker:
+    build: .
+    image: ilinker:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${DOCKER_BIND:-0.0.0.0}:${DOCKER_PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/data
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:-}"
+    volumes:
+      - ilinker-data:/app/data
+    stop_grace_period: 30s
+
+volumes:
+  ilinker-data:
