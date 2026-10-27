@@ -40,19 +40,20 @@ docker compose ps
 默认通过宿主机的 `3000` 端口访问后台。容器内固定监听 `0.0.0.0:3000`，数据保存在命名卷 `ilinker-data` 的 `/app/data` 中，
 包括 SQLite 数据库、图片、加密密钥及 CLI 登录状态。容器重建后继续使用该卷，机器人会自动恢复连接。
 
-需要设置对外访问地址时，复制 `.env.docker.example` 为 `.env.docker`，例如：
+本地运行与 Docker Compose 共用 `.env.example`。需要设置对外访问地址时，将其复制为 `.env` 并按需修改，例如：
 
 ```dotenv
 PUBLIC_ORIGIN=http://192.168.0.10:3000
 ```
 
 ```sh
-docker compose --env-file .env.docker up -d --build
-docker compose --env-file .env.docker logs --tail=100 ilinker
+docker compose up -d --build
+docker compose logs --tail=100 ilinker
 ```
 
+Compose 自动从 `.env` 读取 `PUBLIC_ORIGIN`、`COOKIE_SECURE` 和 `ENCRYPTION_KEY`；容器内的 `HOST`、`PORT`、`DATA_DIR` 由 `compose.yaml` 固定。
 需要限制宿主机绑定 IP 或更换端口时，直接修改 `compose.yaml` 的 `ports`，例如 `192.168.0.10:3000:3000` 或 `3001:3000`，
-同时更新 `PUBLIC_ORIGIN`。使用自定义环境文件时，后续 Compose 命令也带上 `--env-file .env.docker`。
+同时更新 `PUBLIC_ORIGIN`。
 HTTPS 反向代理部署时将 `PUBLIC_ORIGIN` 设置为公网 HTTPS 源地址，并设置 `COOKIE_SECURE=true`。
 
 镜像内置 `/healthz` 健康检查。Docker 构建上下文排除了本机 `.env`、数据库、密钥、测试数据和 `node_modules`；
