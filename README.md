@@ -60,6 +60,26 @@ HTTPS 反向代理部署时将 `PUBLIC_ORIGIN` 设置为公网 HTTPS 源地址�
 镜像内置 `/healthz` 健康检查。Docker 构建上下文排除了本机 `.env`、数据库、密钥、测试数据和 `node_modules`；
 新容器使用独立的数据卷。每个数据卷只运行一个网关服务实例。
 
+### GitHub Actions 镜像发布
+
+`.github/workflows/docker.yml` 先在 Linux / Windows 上运行测试和构建，通过后构建 `linux/amd64`、`linux/arm64` 镜像并发布到 `ghcr.io/stacklix/ilinker`。
+使用 GitHub 自动提供的 `GITHUB_TOKEN`（`packages: write`），无需额外配置发布 Token。
+
+- 推送到 `master`：发布 `latest`、`master` 和 `sha-<提交摘要>` 标签。
+- 推送 `v*` 标签（例如 `v1.0.0`）：发布同名镜像标签和 SHA 标签，不覆盖 `latest`。
+- 向 `master` 提交 PR：执行测试和镜像构建，不发布。
+- Actions 页面可手动运行；只有 `master` 或 `v*` 标签允许发布。
+
+首次发布后，如需匿名拉取，在 GitHub 包设置中将包的可见性设为 Public；私有包需要先通过 `docker login ghcr.io` 登录具备拉取权限的账号。
+使用已发布镜像，无需在服务器上构建：
+
+```sh
+docker run -d --name ilinker --restart unless-stopped --init -p 3000:3000 -v ilinker-data:/app/data ghcr.io/stacklix/ilinker:latest
+docker exec -it ilinker ilinker bot bind --name "微信通知"
+```
+
+升级时先 `docker pull ghcr.io/stacklix/ilinker:latest`，再使用相同数据卷重新创建容器。不要同时启动多个实例共享该卷。
+
 ## CLI 管理
 
 CLI 通过后台 API 操作。容器内管理机器人和 WebHook 无需登录，也无需先创建管理员；Web 后台和远程 CLI 仍需管理员认证。先启动服务，再执行命令。
