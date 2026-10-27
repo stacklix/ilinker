@@ -40,7 +40,7 @@ afterEach(async () => { for (const item of fixtures.splice(0)) { await item.app.
 async function fixture(workers = false, imageDownloader?: ImageDownloader, publicOrigin?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'ilinker-test-'));
   const adapter = new TestAdapter();
-  const result = await createApp({ dataDir: dir, adapter, imageDownloader, publicOrigin, startWorkers: workers, webDir: join(dir, 'no-web') });
+  const result = await createApp({ dataDir: dir, adapter, imageDownloader, publicOrigin, logger: false, startWorkers: workers, webDir: join(dir, 'no-web') });
   fixtures.push({ app: result.app, dir });
   const session = 'test-admin-session';
   result.store.run('INSERT INTO admins VALUES (1,?,?)', 'admin', await passwordHash('correct-password-123'));

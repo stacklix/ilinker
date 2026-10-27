@@ -326,7 +326,8 @@ Token 只能查询由自身 WebHook 创建的消息。
 密码使用 scrypt；微信凭证和会话上下文使用 AES-256-GCM 加密。
 
 完整 WebHook Token 只在创建或重置时返回，数据库只保存摘要。重置立即使旧地址失效。
-应用未启用原始请求 URL 日志；反向代理访问日志也应对 `/webhook/message/` 后的 Token 脱敏。
+应用默认将请求开始、完成状态码、耗时和请求 ID 输出到标准输出，可用 `docker compose logs --tail=100 -f ilinker` 查看。
+请求日志仅记录路由模板，不记录完整 WebHook Token、查询参数、请求头、请求体或响应体；反向代理访问日志也应对 `/webhook/message/` 后的 Token 脱敏。
 对外提供服务前先在本地完成管理员初始化，并配置 HTTPS 和安全 Cookie；可通过 `PUBLIC_ORIGIN` 固定允许的访问源。
 
 备份时保存整个 `DATA_DIR`；使用外部 ENCRYPTION_KEY 时另行备份该密钥。丢失密钥将无法恢复微信凭证和会话上下文。

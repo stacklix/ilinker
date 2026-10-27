@@ -1,4 +1,4 @@
-import Fastify, { type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyLoggerOptions, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import staticPlugin from '@fastify/static';
@@ -22,11 +22,23 @@ const COOKIE = 'ilinker_session';
 const SESSION_MS = 7 * 86_400_000;
 export interface AppOptions {
   dataDir: string; encryptionKey?: string; publicOrigin?: string; cookieSecure?: boolean; localCliToken?: string;
+  logger?: false | Pick<FastifyLoggerOptions, 'stream'>;
   adapter?: PlatformAdapter; startWorkers?: boolean; webDir?: string; imageDownloader?: ImageDownloader;
 }
 
 export async function createApp(options: AppOptions) {
-  const app = Fastify({ logger: false, bodyLimit: 32 * 1024, trustProxy: false });
+  const app = Fastify({
+    logger: options.logger === false ? false : {
+      ...options.logger,
+      level: 'info',
+      serializers: {
+        // Route templates omit tokens, path parameters, queries, headers and bodies.
+        req: request => ({ method: request.method, url: request.routeOptions?.url || '[unmatched]', remoteAddress: request.ip }),
+        res: reply => ({ statusCode: reply.statusCode }),
+      },
+    },
+    bodyLimit: 32 * 1024, trustProxy: false,
+  });
   const store = new Store(options.dataDir);
   const vault = new Vault(options.dataDir, options.encryptionKey);
   const gateway = new Gateway(store, vault, options.adapter || new WechatAdapter(), options.imageDownloader);
@@ -78,7 +90,7 @@ export async function createApp(options: AppOptions) {
       hashToken(request.headers['x-ilinker-local-cli']) === hashToken(options.localCliToken);
     if (!publicPaths.includes(path) && !localCli && !sessionValid(request.cookies[COOKIE])) throw new AppError(401, 'UNAUTHENTICATED', '请先登录后台');
   });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ code: 'VALIDATION_ERROR', message: error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；') });
     if (error instanceof AppError) return reply.code(error.statusCode).send({ code: error.code, message: error.message });
     if (error instanceof PlatformError) return reply.code(502).send({ code: 'PLATFORM_ERROR', message: error.message });
@@ -86,7 +98,7 @@ export async function createApp(options: AppOptions) {
     if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
       return reply.code(statusCode).send({ code: 'INVALID_REQUEST', message: statusCode === 413 ? '请求内容过大' : '请求格式不正确' });
     }
-    console.error('[iLinker] 请求处理失败', error instanceof Error ? error.name : 'UnknownError');
+    request.log.error({ errorType: error instanceof Error ? error.name : 'UnknownError' }, 'request failed');
     return reply.code(500).send({ code: 'INTERNAL_ERROR', message: '服务处理失败，请稍后重试' });
   });
 
@@ -387,13 +399,15 @@ export async function createApp(options: AppOptions) {
   });
 
   const webDir = options.webDir || resolve('dist/web');
-  if (existsSync(webDir)) {
+  const hasWeb = existsSync(webDir);
+  if (hasWeb) {
     await app.register(staticPlugin, { root: webDir, maxAge: 0 });
-    app.setNotFoundHandler((request, reply) => {
-      if (request.method === 'GET' && request.url.split('?')[0] === '/') return reply.sendFile('index.html');
-      return reply.code(404).send({ code: 'NOT_FOUND', message: '接口不存在' });
-    });
   }
+  // Fastify's default 404 log includes the raw URL, which can contain a token.
+  app.setNotFoundHandler((request, reply) => {
+    if (hasWeb && request.method === 'GET' && request.url.split('?')[0] === '/') return reply.sendFile('index.html');
+    return reply.code(404).send({ code: 'NOT_FOUND', message: '接口不存在' });
+  });
   app.addHook('preClose', async () => { await gateway.close(); });
   app.addHook('onClose', async () => { store.close(); });
   if (options.startWorkers !== false) gateway.start();

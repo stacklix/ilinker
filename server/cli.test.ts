@@ -35,7 +35,7 @@ async function fixture(localCliToken?: string) {
     async updates(_credentials, _cursor, signal) { await delay(50, undefined, { signal }); return { msgs: [] }; },
     async send() {}, async notify() {},
   };
-  const instance = await createApp({ dataDir: dir, adapter, startWorkers: false, webDir: join(dir, 'no-web'), localCliToken });
+  const instance = await createApp({ dataDir: dir, adapter, logger: false, startWorkers: false, webDir: join(dir, 'no-web'), localCliToken });
   fixtures.push({ app: instance.app, dir });
   const url = await instance.app.listen({ host: '127.0.0.1', port: 0 });
   const output: string[] = [], info: string[] = [];
