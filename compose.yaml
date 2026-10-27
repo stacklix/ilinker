@@ -1,7 +1,6 @@
 services:
   ilinker:
-    build: .
-    image: ilinker:local
+    image: ghcr.io/stacklix/ilinker:latest
     restart: unless-stopped
     init: true
     ports:

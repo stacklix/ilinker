@@ -31,9 +31,11 @@ npm start
 ## Docker 部署
 
 镜像使用 Node.js 24，多阶段构建前后端，以非 root 用户运行。需要 Docker Engine / Docker Desktop 和 Compose v2。
+Compose 默认使用已发布的 `ghcr.io/stacklix/ilinker:latest` 镜像，无需在部署主机构建。
 
 ```sh
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 ```
 
@@ -47,7 +49,7 @@ PUBLIC_ORIGIN=http://192.168.0.10:3000
 ```
 
 ```sh
-docker compose up -d --build
+docker compose up -d
 docker compose logs --tail=100 ilinker
 ```
 
@@ -58,6 +60,8 @@ HTTPS 反向代理部署时将 `PUBLIC_ORIGIN` 设置为公网 HTTPS 源地址�
 
 镜像内置 `/healthz` 健康检查。Docker 构建上下文排除了本机 `.env`、数据库、密钥、测试数据和 `node_modules`；
 新容器使用独立的数据卷。每个数据卷只运行一个网关服务实例。
+
+Compose 升级时运行 `docker compose pull`，再运行 `docker compose up -d`，继续使用原数据卷。
 
 ### GitHub Actions 镜像发布
 
