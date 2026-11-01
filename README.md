@@ -194,7 +194,7 @@ Docker 内默认操作 `/app/data`，通常无需 `--data-dir`。交互输入需
 此功能用于登录 iLinker 管理后台，与微信机器人扫码绑定相互独立。密码登录、首次创建管理员和 `auth reset-password` 始终保留。
 需要同时升级支持第三方应用授权的 Hako 服务端和 iOS 客户端；手机的 Console 公钥须已登记并登录 Hako。第三方二维码使用 `hako://web-login?v=2`，旧版手机端会拒绝扫描。
 
-1. 用 Hako 手机扫码登录 Hako Web 管理后台，打开「应用管理 → 创建应用」。填写应用名称（例如 iLinker）和 iLinker 的实际 HTTPS 地址。
+1. 用 Hako 手机扫码登录 Hako Web 管理后台，打开「应用管理 → 创建应用」。填写应用名称（例如 iLinker）和 iLinker 的实际应用地址（HTTPS 或局域网 HTTP）。
 2. Hako 自动生成应用 ID 和 SK，并显示可复制的 iLinker 环境配置。SK 仅在创建或轮换时显示一次；请直接保存到部署环境，不要发到聊天或提交到仓库。无需手工计算哈希或修改 Hako 的 `server.json`。
 3. 在 iLinker 的 `.env` / 部署环境中粘贴生成的配置，并设置对外地址：
 
@@ -208,6 +208,8 @@ Docker 内默认操作 `/app/data`，通常无需 `--data-dir`。交互输入需
    本机和 Docker Compose 使用同一组变量。使用包含本次功能的新版本后重启；Compose 可执行 `docker compose up -d --force-recreate ilinker`。后端必须通过有效证书的 HTTPS 连接 Hako，不跟随重定向或忽略证书错误。
 4. 用原密码登录 iLinker，打开「系统设置 → Hako 扫码登录」，重新输入管理员密码，然后在 Hako「设置 → 扫码登录」扫描绑定二维码。核对应用、应用地址、绑定用途和六位确认码后批准。
 5. 退出后台后，登录页出现「密码登录 / Hako 扫码」两个入口。后续扫码只能登录已绑定身份对应的现有管理员，不会自动注册或按用户名匹配。
+
+局域网部署可在 Hako 登记 `http://192.168.0.2:8001`，并在 iLinker 设置 `PUBLIC_ORIGIN=http://192.168.0.2:8001`；HTTP 访问不要启用 `COOKIE_SECURE=true`。支持私有 IPv4、IPv6 ULA、回环、链路本地地址、localhost / .localhost 及 .local 主机。应用地址不带路径、查询或片段；Hako 服务端和手机端需同步更新。`HAKO_URL` 仍指向 HTTPS Hako 服务，SK 不会发送到应用地址。
 
 应用和 SK 哈希持久保存在 Hako 加密数据库，重启后保留。Hako「应用管理」支持停用 / 启用及轮换 SK：停用立即撤销该应用的待登录请求和 Hako 授权，iLinker 在下一次授权校验时拒绝旧会话；重新启用不恢复旧请求或会话。轮换后旧 SK 立即失效，需将新 SK 更新到 iLinker 并重启，无需重新绑定同一 Hako 身份。SK 遗失时通过轮换恢复，不能查询旧 SK。
 
