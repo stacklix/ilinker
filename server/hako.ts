@@ -9,7 +9,7 @@ const token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const startSchema = z.object({ id: token, redeemToken: token, confirmationCode: z.string().regex(/^\d{6}$/), qrPayload: z.string().max(2048), expiresAt: z.string().datetime() });
 const identitySchema = z.object({ issuer: z.string(), subject: token, username: z.string().min(1).max(80), clientId: z.string(), purpose: z.enum(['bind', 'login']), sessionToken: token.optional(), expiresAt: z.string().datetime().optional() });
 type Binding = { issuer: string; subject: string; username: string; version: string };
-type Pending = { id: string; browserHash: string; redeem: string; passwordHash: string; bindingVersion?: string; sessionHash?: string; purpose: 'bind' | 'login'; expiresAt: number; busy: boolean };
+type Pending = { id: string; browserHash: string; redeem: string; passwordHash: string; configHash: string; bindingVersion?: string; sessionHash?: string; purpose: 'bind' | 'login'; expiresAt: number; busy: boolean };
 const COOKIE = 'ilinker_hako_pending';
 const SESSION = 'ilinker_session';
 const notFound = () => new AppError(410, 'HAKO_REQUEST_EXPIRED', '二维码已失效，请刷新后重新扫码');
@@ -24,13 +24,25 @@ export class HakoAuth {
   private pending = new Map<string, Pending>();
   private config?: HakoConfig;
   private configHash = '';
+  private source: 'page' | 'environment' | 'none' = 'none';
   constructor(private store: Store, private vault: Vault, config?: HakoConfig, private fetcher: typeof fetch = fetch, private secure = false) {
-    if (!config) return;
+    const saved = store?.get<{ value: string }>('SELECT value FROM hako_settings WHERE id=1');
+    if (saved) { config = JSON.parse(vault.open(saved.value)) || undefined; this.source = 'page'; }
+    else if (config) this.source = 'environment';
+    this.configure(config);
+  }
+  private normalize(config: HakoConfig): HakoConfig {
     let url: URL;
     try { url = new URL(config.serverUrl); } catch { throw new Error('HAKO_URL 必须为 HTTPS 根地址'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^[A-Za-z0-9_-]{1,80}$/.test(config.clientId) || !token.safeParse(config.clientSecret).success) throw new Error('Hako 配置无效：需 HTTPS 根地址、应用 ID 和 32 字节 Base64url 应用密钥');
-    this.config = { ...config, serverUrl: url.origin };
-    this.configHash = hashToken(JSON.stringify(this.config));
+    return { serverUrl: url.origin, clientId: config.clientId, clientSecret: config.clientSecret };
+  }
+  private configure(config?: HakoConfig) {
+    this.config = config ? this.normalize(config) : undefined;
+    this.configHash = this.config ? hashToken(JSON.stringify(this.config)) : '';
+  }
+  private settingsView() {
+    return { configured: !!this.config, source: this.source, serverUrl: this.config?.serverUrl || '', clientId: this.config?.clientId || '', secretSet: !!this.config?.clientSecret, secretMask: this.config ? '••••••••••••••••' : '' };
   }
   private binding() { return this.store.get<Binding>('SELECT * FROM hako_binding WHERE id=1'); }
   enabled() { return !!this.config && this.binding()?.issuer === this.config.serverUrl; }
@@ -84,10 +96,13 @@ export class HakoAuth {
     return admin;
   }
   private async cancel(pending: Pending) {
+    if (pending.configHash !== this.configHash) return;
     try { await this.request('DELETE', `/requests/${pending.id}`, { 'X-Hako-Request': pending.redeem }); } catch { /* Remote requests expire automatically. */ }
   }
   private async start(request: FastifyRequest, reply: FastifyReply, purpose: 'bind' | 'login') {
+    const configHash = this.configHash;
     const config = this.requireConfig(), admin = purpose === 'bind' ? await this.reauthenticate(request) : this.admin();
+    if (this.configHash !== configHash) throw notFound();
     if (!admin) throw new AppError(409, 'SETUP_REQUIRED', '请先创建本地管理员');
     const binding = this.binding();
     if (purpose === 'login' && !this.enabled()) throw new AppError(409, 'HAKO_NOT_BOUND', '请先用密码登录并绑定 Hako');
@@ -104,17 +119,41 @@ export class HakoAuth {
     const browser = newToken();
     if (this.admin()?.password_hash !== admin.password_hash || this.binding()?.version !== binding?.version) throw notFound();
     const qrImage = await QRCode.toDataURL(data.qrPayload, { width: 280, margin: 2 });
-    this.pending.set(data.id, { id: data.id, browserHash: hashToken(browser), redeem: data.redeemToken, passwordHash: admin.password_hash, bindingVersion: binding?.version, purpose, expiresAt, busy: false, ...(purpose === 'bind' ? { sessionHash: hashToken(request.cookies[SESSION]!) } : {}) });
+    if (this.configHash !== configHash) throw notFound();
+    this.pending.set(data.id, { id: data.id, browserHash: hashToken(browser), redeem: data.redeemToken, passwordHash: admin.password_hash, configHash, bindingVersion: binding?.version, purpose, expiresAt, busy: false, ...(purpose === 'bind' ? { sessionHash: hashToken(request.cookies[SESSION]!) } : {}) });
     reply.setCookie(COOKIE, browser, { path: '/api/v1/auth/hako', httpOnly: true, sameSite: 'strict', secure: this.secure, maxAge: 90 });
     return { id: data.id, qrImage, qrContent: data.qrPayload, confirmationCode: data.confirmationCode, expiresAt, purpose };
   }
   private getPending(request: FastifyRequest) {
     const { id } = request.params as { id: string }, pending = this.pending.get(id);
     if (!pending || !request.cookies[COOKIE] || pending.browserHash !== hashToken(request.cookies[COOKIE])) throw notFound();
-    if (pending.expiresAt <= Date.now() || pending.passwordHash !== this.admin()?.password_hash || pending.bindingVersion !== this.binding()?.version || (pending.sessionHash && !this.store.get('SELECT hash FROM sessions WHERE hash=? AND expires_at>?', pending.sessionHash, Date.now()))) { this.pending.delete(id); throw notFound(); }
+    if (pending.configHash !== this.configHash || pending.expiresAt <= Date.now() || pending.passwordHash !== this.admin()?.password_hash || pending.bindingVersion !== this.binding()?.version || (pending.sessionHash && !this.store.get('SELECT hash FROM sessions WHERE hash=? AND expires_at>?', pending.sessionHash, Date.now()))) { this.pending.delete(id); throw notFound(); }
     return pending;
   }
   register(app: FastifyInstance) {
+    app.get('/api/v1/auth/hako/settings', async () => this.settingsView());
+    app.put('/api/v1/auth/hako/settings', { config: { rateLimit: { max: 8 } } }, async request => {
+      const body = z.object({ serverUrl: z.string().trim().min(1).max(2048), clientId: z.string().trim().min(1).max(80), clientSecret: z.string().max(128).optional(), currentPassword: z.string().max(128) }).strict().parse(request.body);
+      const admin = await this.reauthenticate(request);
+      // Never forward an old secret to a different server or application.
+      let server: URL;
+      try { server = new URL(body.serverUrl); } catch { throw new AppError(400, 'INVALID_HAKO_CONFIG', '请填写有效的 Hako HTTPS 根地址'); }
+      const keepSecret = !body.clientSecret;
+      if (keepSecret && (!this.config || server.origin !== this.config.serverUrl || body.clientId !== this.config.clientId)) throw new AppError(400, 'HAKO_SECRET_REQUIRED', '首次配置或更换服务器、应用 ID 时，请填写新的 SK');
+      let config: HakoConfig;
+      try { config = this.normalize({ serverUrl: body.serverUrl, clientId: body.clientId, clientSecret: body.clientSecret || this.config!.clientSecret }); }
+      catch { throw new AppError(400, 'INVALID_HAKO_CONFIG', '配置无效：需 HTTPS 根地址、有效的应用 ID 和 Hako 生成的 SK'); }
+      const nextHash = hashToken(JSON.stringify(config));
+      this.store.transaction(() => {
+        if (this.admin()?.password_hash !== admin.password_hash || !this.store.get('SELECT hash FROM sessions WHERE hash=? AND expires_at>?', hashToken(request.cookies[SESSION]!), Date.now())) throw new AppError(401, 'UNAUTHENTICATED', '登录已失效，请重新登录');
+        this.store.run('INSERT INTO hako_settings VALUES (1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', this.vault.seal(JSON.stringify(config)));
+        if (nextHash !== this.configHash) this.store.run('DELETE FROM sessions WHERE hash IN (SELECT hash FROM hako_sessions)');
+        if (this.config?.serverUrl !== config.serverUrl) this.store.run('DELETE FROM hako_binding');
+      });
+      if (nextHash !== this.configHash) this.pending.clear();
+      this.configure(config); this.source = 'page';
+      return this.settingsView();
+    });
     app.get('/api/v1/auth/hako/binding', async () => ({ configured: !!this.config, bound: !!this.binding(), issuer: this.binding()?.issuer || this.config?.serverUrl, username: this.binding()?.username }));
     app.post('/api/v1/auth/hako/bind', { config: { rateLimit: { max: 8 } } }, (request, reply) => this.start(request, reply, 'bind'));
     app.post('/api/v1/auth/hako/unbind', { config: { rateLimit: { max: 8 } } }, async request => {

@@ -11,7 +11,7 @@ import { resetAdminPassword } from './reset-password.js';
 const fixtures: { dir: string; app: Awaited<ReturnType<typeof createApp>>['app'] }[] = [];
 afterEach(async () => { for (const { dir, app } of fixtures.splice(0)) { await app.close(); assert.ok(dir.startsWith(join(tmpdir(), 'ilinker-hako-'))); await rm(dir, { recursive: true, force: true }); } });
 const password = 'local-password-2026';
-async function fixture() {
+async function fixture(configured = true) {
   const dir = await mkdtemp(join(tmpdir(), 'ilinker-hako-'));
   const config = { serverUrl: 'https://hako.example.com', clientId: 'ilinker', clientSecret: newToken() };
   const state = { subject: newToken(), unavailable: false, malformed: false, completeGate: undefined as (() => Promise<void>) | undefined };
@@ -49,7 +49,7 @@ async function fixture() {
     }
     return response({ status: request.status });
   };
-  const instance = await createApp({ dataDir: dir, logger: false, startWorkers: false, hako: config, hakoFetch: fetcher });
+  const instance = await createApp({ dataDir: dir, logger: false, startWorkers: false, hako: configured ? config : undefined, hakoFetch: fetcher });
   fixtures.push({ app: instance.app, dir });
   instance.store.run('INSERT INTO admins VALUES (1,?,?)', 'local-admin', await passwordHash(password));
   const login = await instance.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: 'local-admin', password } });
@@ -151,4 +151,65 @@ test('Hako settings reject partial configuration, insecure origins and invalid s
     { serverUrl: 'https://hako.example.com/path', clientId: 'ilinker', clientSecret: newToken() },
     { serverUrl: 'https://hako.example.com', clientId: 'ilinker', clientSecret: 'weak' },
   ]) assert.throws(() => new HakoAuth(null!, null!, config), /Hako 配置无效/);
+});
+
+test('page settings require a password, persist encrypted credentials and return a fixed mask', async () => {
+  const f = await fixture();
+  const read = () => f.app.inject({ url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie } });
+  const write = (body: object, cookie = f.cookie) => f.app.inject({ method: 'PUT', url: '/api/v1/auth/hako/settings', headers: { cookie }, payload: body });
+  assert.equal((await read()).json().source, 'environment');
+  const secret = newToken(), body = { serverUrl: f.config.serverUrl, clientId: f.config.clientId, clientSecret: secret, currentPassword: password };
+  assert.equal((await write(body, '')).statusCode, 401);
+  assert.equal((await write({ ...body, currentPassword: 'wrong' })).statusCode, 400);
+  assert.equal(f.store.get('SELECT * FROM hako_settings'), undefined);
+  const saved = await write(body);
+  assert.equal(saved.statusCode, 200, saved.body);
+  const view = (await read()).json();
+  assert.equal(view.source, 'page'); assert.equal(view.secretSet, true); assert.equal(view.secretMask, '••••••••••••••••');
+  assert.ok(!saved.body.includes(secret) && !JSON.stringify(view).includes(secret));
+  const row = f.store.get<{ value: string }>('SELECT value FROM hako_settings')!;
+  assert.ok(!row.value.includes(secret)); assert.equal(JSON.parse(f.vault.open(row.value)).clientSecret, secret);
+  const restarted = await createApp({ dataDir: f.dir, logger: false, startWorkers: false, hako: { ...f.config, serverUrl: 'https://fallback.example.com' } });
+  try {
+    const settings = await restarted.app.inject({ url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie } });
+    assert.equal(settings.json().serverUrl, f.config.serverUrl); assert.equal(settings.json().source, 'page');
+    assert.ok(!settings.body.includes(secret));
+  } finally { await restarted.app.close(); }
+});
+
+test('an unconfigured installation can save Hako settings and bind without restart or environment variables', async () => {
+  const f = await fixture(false);
+  const before = await f.app.inject({ url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie } });
+  assert.equal(before.json().configured, false); assert.equal(before.json().secretMask, '');
+  const saved = await f.app.inject({ method: 'PUT', url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie }, payload: { ...f.config, currentPassword: password } });
+  assert.equal(saved.statusCode, 200, saved.body); assert.equal(saved.json().source, 'page');
+  await f.bind(); await f.scanLogin();
+});
+
+test('masked SK is retained when blank, credentials cannot move to another application implicitly', async () => {
+  const f = await fixture(); await f.bind(); const login = await f.scanLogin();
+  const save = (body: object) => f.app.inject({ method: 'PUT', url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie }, payload: { currentPassword: password, ...body } });
+  const fields = { serverUrl: f.config.serverUrl, clientId: f.config.clientId };
+  assert.equal((await save({ ...fields, clientSecret: '' })).statusCode, 200);
+  assert.equal(JSON.parse(f.vault.open(f.store.get<{ value: string }>('SELECT value FROM hako_settings')!.value)).clientSecret, f.config.clientSecret);
+  assert.equal((await f.app.inject({ url: '/api/v1/auth/me', headers: { cookie: login.cookie } })).statusCode, 200);
+  assert.equal((await save({ ...fields, clientId: 'different' })).statusCode, 400);
+  assert.equal((await save({ ...fields, serverUrl: 'https://different.example.com' })).statusCode, 400);
+  assert.equal((await save({ ...fields, serverUrl: 'http://unsafe.example.com', clientSecret: newToken() })).statusCode, 400);
+  assert.ok(f.store.get('SELECT * FROM hako_binding'));
+});
+
+test('settings changes take effect immediately, invalidate pending scans and Hako sessions, preserve password login', async () => {
+  const f = await fixture(); await f.bind(); const login = await f.scanLogin(), pending = await f.start();
+  const next = newToken();
+  const response = await f.app.inject({ method: 'PUT', url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie }, payload: { serverUrl: f.config.serverUrl, clientId: f.config.clientId, clientSecret: next, currentPassword: password } });
+  assert.equal(response.statusCode, 200);
+  assert.equal((await f.complete(pending)).statusCode, 410);
+  assert.equal((await f.app.inject({ url: '/api/v1/auth/me', headers: { cookie: login.cookie } })).statusCode, 401);
+  assert.equal((await f.app.inject({ url: '/api/v1/auth/me', headers: { cookie: f.cookie } })).statusCode, 200);
+  assert.ok(f.store.get('SELECT * FROM hako_binding'));
+  f.config.clientSecret = next; // Provider now expects the rotated key.
+  await f.scanLogin();
+  const changed = await f.app.inject({ method: 'PUT', url: '/api/v1/auth/hako/settings', headers: { cookie: f.cookie }, payload: { serverUrl: 'https://other-hako.example.com', clientId: 'new-app', clientSecret: newToken(), currentPassword: password } });
+  assert.equal(changed.statusCode, 200); assert.equal(f.store.get('SELECT * FROM hako_binding'), undefined);
 });

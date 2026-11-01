@@ -32,6 +32,7 @@ export class Store {
       PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS hako_settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS hako_binding (
         id INTEGER PRIMARY KEY CHECK(id=1), issuer TEXT NOT NULL, subject TEXT NOT NULL,
         username TEXT NOT NULL, version TEXT NOT NULL
