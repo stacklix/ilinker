@@ -68,7 +68,7 @@ function WebHookDetails({ webhook, initialTab, bots, revision, refresh, notify, 
     {tab === 'integration' && <>
       <div className="target-card"><span className="webhook-intro-icon"><Webhook size={23} /></span><div><strong>固定目标，轻量调用</strong><p>{webhook.conversationName ? `消息将发送到 ${webhook.conversationName}` : '请先在微信中给机器人发送一条消息'}</p></div>{webhook.conversationId && <button className="text-link" onClick={() => { navigate('messages', webhook.botId); onClose(); }}>查看会话<ArrowRight size={14} /></button>}</div>
       <label className="field-title">接口地址</label><div className="endpoint"><span>POST</span><code>{template}</code></div><p className="small quiet">将 &lt;token&gt; 替换为创建时保存的 Token。无需 Authorization 请求头。</p>
-      <NotificationExamples /><p className="small quiet">微信限制：24 小时内未收到接收人的消息时，接口返回 HTTP 409（WECHAT_SEND_WINDOW_EXPIRED）。请接收人在微信中给机器人发消息后重试。排队后失败请查询状态中的 code 和 error。</p>
+      <NotificationExamples /><p className="small quiet">微信限制：24 小时内未收到接收人的消息时，接口返回 HTTP 409（WECHAT_SEND_WINDOW_EXPIRED）。请接收人在微信中给机器人发消息后重试。在线机器人会在窗口关闭前 30 分钟自动提醒一次，请主动回复消息续期。排队后失败请查询状态中的 code 和 error。</p>
       <div className="integration-notes"><div><ShieldCheck size={16} /><p><strong>避免重复发送</strong><span>可选请求头 Idempotency-Key，24 小时内同一个键只创建一条消息。</span></p></div><div><Zap size={16} /><p><strong>异步发送</strong><span>HTTP 202 表示进入队列。使用 GET /webhook/message/&lt;token&gt;/status/&lt;messageId&gt; 查询结果。</span></p></div></div>
       <Button variant="secondary" icon={KeyRound} onClick={async () => { if (!confirm('重置后旧 Webhooks 地址立即失效，需要更新外部应用配置。继续？')) return; try { const result = await post<{ path: string }>(`/webhooks/${webhook.id}/rotate-token`); refresh(); onSecret(result.path); } catch (error) { setError((error as Error).message); } }}>重置 Token 并生成新地址</Button>
     </>}

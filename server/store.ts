@@ -73,6 +73,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS messages_queue ON messages(status, seq);
       CREATE INDEX IF NOT EXISTS messages_time ON messages(created_at);
       CREATE INDEX IF NOT EXISTS messages_webhook ON messages(webhook_id, seq);
+      CREATE INDEX IF NOT EXISTS messages_inbound_time ON messages(conversation_id,MIN(created_at,updated_at)) WHERE direction='in';
+      CREATE TABLE IF NOT EXISTS send_window_reminders (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+        window_start INTEGER NOT NULL, message_id TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS message_images (
         message_id TEXT PRIMARY KEY REFERENCES messages(id), source_url TEXT, data BLOB, mime TEXT
       );

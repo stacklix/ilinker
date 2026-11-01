@@ -7,7 +7,7 @@ import { AppError, Vault } from './security.js';
 import { Store, id, getMessage, messageColumns, type BotRecord, type ConversationRecord, type WebHookRecord } from './store.js';
 import { ILINK_BASE, PlatformError, validatedBase, type Credentials, type IncomingMessage, type PlatformAdapter } from './ilink.js';
 import { downloadRemoteImage, notificationSummary, type ImageDownloader, type Notification } from './images.js';
-import { SEND_WINDOW_CODE, SEND_WINDOW_MESSAGE, SEND_WINDOW_MS } from './send-window.js';
+import { SEND_WINDOW_CODE, SEND_WINDOW_MESSAGE, SEND_WINDOW_MS, SEND_WINDOW_REMINDER_LEAD_MS, SEND_WINDOW_REMINDER_CHECK_MS, SEND_WINDOW_REMINDER_SOURCE } from './send-window.js';
 
 interface ActiveLogin extends LoginSession { qrcode: string; baseUrl: string; code?: string; controller: AbortController }
 export class Gateway {
@@ -17,6 +17,7 @@ export class Gateway {
   private sending = new Map<string, AbortController>();
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
+  private nextReminderCheck = 0;
   constructor(public store: Store, public vault: Vault, public adapter: PlatformAdapter, private imageDownloader: ImageDownloader = downloadRemoteImage) { this.events.setMaxListeners(200); }
   changed(botId?: string) { this.events.emit('change', { botId, at: Date.now() }); }
   credentials(bot: BotRecord): Credentials {
@@ -230,9 +231,35 @@ export class Gateway {
   enqueueWebhook(webhook: WebHookRecord, notification: Notification, source: string): Message {
     return this.enqueueNotification(webhook.bot_id, notification, source, webhook.id);
   }
+  private lastInboundTime(conversationId: string) {
+    return this.store.get<{ time: number | null }>("SELECT MAX(MIN(created_at,updated_at)) time FROM messages WHERE conversation_id=? AND direction='in'", conversationId)?.time;
+  }
   assertSendWindow(conversationId: string) {
-    const last = this.store.get<{ time: number | null }>("SELECT MAX(MIN(created_at,updated_at)) time FROM messages WHERE conversation_id=? AND direction='in'", conversationId)?.time;
+    const last = this.lastInboundTime(conversationId);
     if (last == null || Date.now() - last >= SEND_WINDOW_MS) throw new AppError(409, SEND_WINDOW_CODE, SEND_WINDOW_MESSAGE);
+  }
+  queueWindowReminders(now = Date.now()) {
+    if (this.closed) return;
+    const candidates = this.store.all<{ id: string; bot_id: string; window_start: number }>(`
+      SELECT c.id,c.bot_id,MAX(MIN(m.created_at,m.updated_at)) window_start
+      FROM conversations c JOIN bots b ON b.id=c.bot_id JOIN messages m ON m.conversation_id=c.id AND m.direction='in'
+      WHERE b.deleted_at IS NULL AND b.enabled=1 AND b.status='online' AND b.credentials IS NOT NULL AND c.context IS NOT NULL
+      GROUP BY c.id
+      HAVING window_start>? AND window_start<=?`, now - SEND_WINDOW_MS, now - SEND_WINDOW_MS + SEND_WINDOW_REMINDER_LEAD_MS);
+    for (const candidate of candidates) {
+      try { this.store.transaction(() => {
+        if (this.lastInboundTime(candidate.id) !== candidate.window_start) return;
+        const previous = this.store.get<{ window_start: number }>('SELECT window_start FROM send_window_reminders WHERE conversation_id=?', candidate.id);
+        if (previous?.window_start === candidate.window_start) return;
+        const remaining = Math.max(1, Math.ceil((candidate.window_start + SEND_WINDOW_MS - now) / 60_000));
+        const message = this.enqueue(candidate.bot_id, `微信通知接收提醒：距离本次 24 小时发送窗口关闭约 ${remaining} 分钟。请主动给当前机器人发送一条消息（例如“续期”），以继续接收通知。仅收到这条提醒不会延长窗口。`, SEND_WINDOW_REMINDER_SOURCE);
+        this.store.run('INSERT INTO send_window_reminders VALUES (?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET window_start=excluded.window_start,message_id=excluded.message_id', candidate.id, candidate.window_start, message.id);
+        this.store.log(candidate.bot_id, 'send_window_reminder', '已创建微信发送窗口临期提醒');
+      }); } catch (error) {
+        // A window may close between selection and enqueueing. Skip it without stopping the worker.
+        if (!(error instanceof AppError)) throw error;
+      }
+    }
   }
   enqueueNotification(botId: string, notification: Notification, source: string, webhookId: string | null = null): Message {
     const bot = this.bot(botId);
@@ -258,6 +285,11 @@ export class Gateway {
   }
   private drain() {
     if (this.closed) return;
+    const now = Date.now();
+    if (now >= this.nextReminderCheck) {
+      this.nextReminderCheck = now + SEND_WINDOW_REMINDER_CHECK_MS;
+      this.queueWindowReminders(now);
+    }
     const queued = this.store.all<Message>(`SELECT ${messageColumns} FROM messages WHERE status='queued' ORDER BY seq LIMIT 100`);
     for (const message of queued) {
       if (this.sending.has(message.botId)) continue;
@@ -279,6 +311,10 @@ export class Gateway {
     this.changed(bot.id);
     let submitted = false;
     try {
+      if (message.source === SEND_WINDOW_REMINDER_SOURCE) {
+        const reminder = this.store.get<{ window_start: number }>('SELECT window_start FROM send_window_reminders WHERE conversation_id=? AND message_id=?', message.conversationId, message.id);
+        if (!reminder || this.lastInboundTime(message.conversationId) !== reminder.window_start) throw new PlatformError('用户已发送新消息，已取消旧窗口提醒');
+      }
       const conversation = this.store.get<ConversationRecord>('SELECT * FROM conversations WHERE id=? AND bot_id=?', message.conversationId, bot.id);
       if (!conversation?.context) throw new PlatformError('会话上下文已失效，请在微信中重新发一条消息');
       this.assertSendWindow(conversation.id);

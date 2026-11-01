@@ -71,14 +71,21 @@ function HakoConnection({ notify, onSaved }: { notify: (message: string) => void
   const { data, error: loadError, setData } = useResource<HakoSettingsData>('/auth/hako/settings');
   const [serverUrl, setServerUrl] = useState(''), [clientId, setClientId] = useState(''), [secret, setSecret] = useState(''), [password, setPassword] = useState('');
   const [replacing, setReplacing] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
-  useEffect(() => { if (data) { setServerUrl(data.serverUrl); setClientId(data.clientId); setReplacing(false); setSecret(''); } }, [data]);
+  const [editing, setEditing] = useState(false);
+  const resetDraft = () => { setServerUrl(data?.serverUrl || ''); setClientId(data?.clientId || ''); setReplacing(false); setSecret(''); setPassword(''); setError(''); };
+  useEffect(() => { if (data) { setServerUrl(data.serverUrl); setClientId(data.clientId); setReplacing(false); setSecret(''); setPassword(''); setEditing(false); } }, [data]);
   const editSecret = !data?.secretSet || replacing;
-  return <section className="panel"><div className="panel-header"><div><h2>Hako 连接配置</h2><p>填写 Hako 应用管理中生成的连接信息，保存后立即生效。</p></div><span className="settings-source">{data?.source === 'page' ? '页面配置' : data?.source === 'environment' ? '来自环境变量' : '尚未配置'}</span></div>
-    <form className="settings-form hako-connection-form" onSubmit={async e => {
+  return <section className="panel"><div className="panel-header"><div><h2>Hako 连接配置</h2><p>{editing ? '填写连接信息，保存后立即生效。' : '用于 Hako 扫码登录的连接信息。'}</p></div><div className="settings-header-actions"><span className="settings-source">{data?.source === 'page' ? '页面配置' : data?.source === 'environment' ? '来自环境变量' : '尚未配置'}</span>{data && !editing && <Button type="button" variant="secondary" onClick={() => { resetDraft(); setEditing(true); }}>{data.configured ? '编辑配置' : '配置连接'}</Button>}</div></div>
+    <ErrorLine error={loadError} />
+    {!data ? !loadError && <div className="settings-form"><Loading /></div> : !editing ? <div className="settings-summary"><dl>
+      <div><dt>Hako 服务地址</dt><dd>{data.serverUrl || '尚未配置'}</dd></div>
+      <div><dt>应用 ID</dt><dd>{data.clientId || '尚未配置'}</dd></div>
+      <div><dt>应用 SK</dt><dd className="settings-secret-mask">{data.secretSet ? data.secretMask : '尚未配置'}</dd></div>
+    </dl><p>{data.secretSet ? 'SK 已加密保存，仅显示掩码。修改连接信息请点击“编辑配置”。' : '在 Hako 创建应用后，点击“配置连接”填写服务地址、应用 ID 和 SK。'}</p></div> : <form className="settings-form hako-connection-form" onSubmit={async e => {
       e.preventDefault(); setBusy(true); setError('');
       try {
         const value = await api<HakoSettingsData>('/auth/hako/settings', { method: 'PUT', body: JSON.stringify({ serverUrl, clientId, ...(editSecret && secret ? { clientSecret: secret } : {}), currentPassword: password }) });
-        setData(value); setPassword(''); setSecret(''); setReplacing(false); onSaved(); notify('Hako 配置已保存并生效');
+        setData(value); setPassword(''); setSecret(''); setReplacing(false); setEditing(false); onSaved(); notify('Hako 配置已保存并生效');
       } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
     }}>
       <ErrorLine error={loadError} />
@@ -87,7 +94,7 @@ function HakoConnection({ notify, onSaved }: { notify: (message: string) => void
       <label>应用 SK<div className="settings-secret-field"><input type="password" required={!data?.secretSet} readOnly={!editSecret} value={editSecret ? secret : data?.secretMask || ''} onChange={e => setSecret(e.target.value)} autoComplete="new-password" placeholder={data?.secretSet ? '留空保留已保存的 SK' : '粘贴 Hako 生成的 SK'} disabled={!data} />{data?.secretSet && <Button type="button" variant="secondary" onClick={() => { setReplacing(v => !v); setSecret(''); }}>{replacing ? '取消替换' : '替换 SK'}</Button>}</div><small>{data?.secretSet ? 'SK 已加密保存，打码显示。替换时填写新值，留空保留原值。' : 'SK 将加密保存，保存后只显示掩码。'}</small></label>
       <label>当前管理员密码<input type="password" required maxLength={128} autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} /></label>
       <p className="quiet small">更换服务地址或应用 ID 时需填写新 SK。配置变化会使已有 Hako 登录失效；更换服务地址后需重新绑定。</p>
-      <ErrorLine error={error} /><Button busy={busy} disabled={!data} type="submit">保存配置</Button>
-    </form>
+      <ErrorLine error={error} /><div className="inline-actions"><Button busy={busy} disabled={!data} type="submit">保存配置</Button><Button type="button" variant="secondary" disabled={busy} onClick={() => { resetDraft(); setEditing(false); }}>取消</Button></div>
+    </form>}
   </section>;
 }
