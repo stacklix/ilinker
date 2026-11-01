@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { chmodSync, writeFileSync } from 'node:fs';
 import { newToken } from './security.js';
 import { createApp } from './app.js';
+import { hakoConfig } from './hako.js';
 
 const port = Number(process.env.PORT || 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须为有效端口');
@@ -15,6 +16,7 @@ if (localCliToken) {
 }
 const { app } = await createApp({
   localCliToken,
+  hako: hakoConfig(process.env),
   dataDir: resolve(process.env.DATA_DIR || './data'),
   encryptionKey: process.env.ENCRYPTION_KEY,
   publicOrigin: process.env.PUBLIC_ORIGIN,

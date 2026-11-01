@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import QRCode from 'qrcode';
+import { resetAdminPassword } from './reset-password.js';
 import type { Bot, LoginSession, WebHook } from '../shared/types.js';
 
 export const CLI_HELP = `iLinker CLI — 管理运行中的通知网关
@@ -11,6 +12,7 @@ export const CLI_HELP = `iLinker CLI — 管理运行中的通知网关
   ilinker auth setup --username <账号>          初始化管理员并登录
   ilinker auth login --username <账号>          登录已有管理员
   ilinker auth logout                          退出 CLI 登录
+  ilinker auth reset-password                  本机重置管理员密码并撤销所有登录
   ilinker bot list                             列出机器人
   ilinker bot bind --name <名称>                创建机器人并扫码绑定
   ilinker bot bind --id <机器人ID>              为已有机器人扫码或恢复原账号
@@ -25,9 +27,11 @@ export const CLI_HELP = `iLinker CLI — 管理运行中的通知网关
 
 认证：容器内操作机器人和 WebHook 无需登录；远程访问需登录。
 交互输入隐藏密码，或通过 --password-stdin 从标准输入读取密码。
+密码恢复：auth reset-password [--data-dir <目录>]，默认 DATA_DIR 或 ./data。
+仅操作本机现有数据库，无需旧密码或服务运行，不支持 --url / --session-file。
 绑定：可用 --qr-file <PNG路径> 保存二维码，--timeout <秒> 设置等待时间（默认300）。
 创建 WebHook：可用 --rate-limit <1-600>、--expires-at <ISO时间>、--public-url <对外地址>。
-CLI 使用网关 API；请先启动服务。机器人只能恢复原绑定账号，不支持换绑。`;
+除密码恢复外，CLI 使用网关 API；请先启动服务。机器人只能恢复原绑定账号，不支持换绑。`;
 
 export interface CliIO {
   out(text: string): void;
@@ -115,16 +119,31 @@ export async function runCli(args: string[], options: CliOptions): Promise<void>
     username: { type: 'string' }, 'password-stdin': { type: 'boolean' }, name: { type: 'string' }, id: { type: 'string' },
     note: { type: 'string' }, 'qr-file': { type: 'string' }, timeout: { type: 'string' }, bot: { type: 'string' },
     'rate-limit': { type: 'string' }, 'expires-at': { type: 'string' }, 'public-url': { type: 'string' },
+    'data-dir': { type: 'string' },
   } });
   if (values.help || positionals.length === 0) { io.out(CLI_HELP); return; }
   const command = positionals.join(' ');
   const allowed: Record<string, string[]> = {
     'auth setup': ['username', 'password-stdin'], 'auth login': ['username', 'password-stdin'], 'auth logout': [],
+    'auth reset-password': ['data-dir', 'password-stdin'],
     'bot list': [], 'bot bind': ['name', 'id', 'note', 'qr-file', 'timeout'], 'webhook list': [],
     'webhook create': ['name', 'bot', 'rate-limit', 'expires-at', 'public-url'],
   };
   if (!(command in allowed)) throw new Error('未知命令，请运行 ilinker --help');
-  for (const key of Object.keys(values)) if (!['url', 'session-file', 'json', 'help', ...allowed[command]].includes(key)) throw new Error(`${command} 不支持 --${key}`);
+  const common = command === 'auth reset-password' ? ['json', 'help'] : ['url', 'session-file', 'json', 'help'];
+  for (const key of Object.keys(values)) if (![...common, ...allowed[command]].includes(key)) throw new Error(`${command} 不支持 --${key}`);
+  const output = (data: unknown, text: string) => io.out(values.json ? JSON.stringify(data, null, 2) : text);
+  if (command === 'auth reset-password') {
+    const dataDir = resolve(values['data-dir'] || env.DATA_DIR || './data');
+    const result = await resetAdminPassword(dataDir, async () => {
+      if (values['password-stdin']) return (await io.passwordStdin()).replace(/\r?\n$/, '');
+      const password = await io.prompt('新密码（10–128 位）：', true, signal);
+      if (password !== await io.prompt('再次输入新密码：', true, signal)) throw new Error('两次密码不一致');
+      return password;
+    }, signal);
+    output({ ok: true, ...result }, `管理员 ${result.username} 的密码已重置，所有 Web / CLI 登录已失效，请重新登录。\n数据目录：${result.dataDir}\n机器人、WebHook 和历史消息已保留。`);
+    return;
+  }
   const base = origin(values.url || defaultUrl(env));
   const file = resolve(values['session-file'] || env.ILINKER_SESSION_FILE || join(env.DATA_DIR || join(homedir(), '.ilinker'), 'cli-session.json'));
   const client = new Client(base, file, options.fetch || fetch, signal);
@@ -134,7 +153,6 @@ export async function runCli(args: string[], options: CliOptions): Promise<void>
     catch { throw new Error('无法读取容器本地管理凭证，请确认容器网关服务已启动'); }
     if (!/^[A-Za-z0-9_-]{32,}$/.test(client.localToken)) throw new Error('容器本地管理凭证无效，请重启网关服务');
   } else await client.load();
-  const output = (data: unknown, text: string) => io.out(values.json ? JSON.stringify(data, null, 2) : text);
   const required = (value: string | undefined, option: string) => { if (!value?.trim()) throw new Error(`需要 --${option}`); return value.trim(); };
 
   if (command === 'auth setup' || command === 'auth login') {

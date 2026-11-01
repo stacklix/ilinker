@@ -87,7 +87,7 @@ docker exec -it ilinker ilinker bot bind --name "微信通知"
 
 ## CLI 管理
 
-CLI 通过后台 API 操作。容器内管理机器人和 WebHook 无需登录，也无需先创建管理员；Web 后台和远程 CLI 仍需管理员认证。先启动服务，再执行命令。
+除本机密码恢复外，CLI 通过后台 API 操作，需要先启动服务。容器内管理机器人和 WebHook 无需登录，也无需先创建管理员；Web 后台和远程 CLI 仍需管理员认证。
 Docker 容器中已经安装 `ilinker` 命令：
 
 ```sh
@@ -123,6 +123,7 @@ npm run cli -- webhook create --bot bot_xxx --name "服务器告警"
 | `auth setup --username NAME` | 首次初始化管理员并登录 |
 | `auth login --username NAME` | 登录已有管理员 |
 | `auth logout` | 撤销当前 CLI 会话并删除本地登录状态 |
+| `auth reset-password [--data-dir PATH]` | 直接重置本机已有管理员密码，并撤销所有 Web / CLI 登录 |
 | `bot list` | 查看机器人 ID、名称、状态及绑定账号 |
 | `bot bind --name NAME [--note TEXT]` | 新建机器人并等待微信扫码 |
 | `bot bind --id BOT_ID` | 为未绑定机器人扫码，或恢复原绑定账号 |
@@ -146,8 +147,75 @@ CLI 默认读取 `.env` 中的 `HOST` / `PORT`，容器内通过 `127.0.0.1:3000
 文件包含管理员会话凭证，Linux 权限为 `0600`。登录过期后重新执行 `auth login`。
 无人值守认证可使用 `--password-stdin` 从管道读取密码，CLI 不接受明文密码命令行参数。
 
+### 忘记管理员密码
+
+在部署服务器的项目目录执行（已构建版本）：
+
+```sh
+npm run cli -- auth reset-password
+```
+
+开发环境可执行 `npm run cli:dev -- auth reset-password`。命令隐藏输入新密码并要求再次确认，新密码为 10–128 位，无需旧密码或管理员登录。
+默认读取 `.env` / 环境变量中的 `DATA_DIR`；未设置时使用当前工作目录下的 `./data`，与服务端一致。自定义数据目录时可明确指定：
+
+```powershell
+npm run cli -- auth reset-password --data-dir "C:\path\to\ilinker-data"
+```
+
+Docker Compose 运行中的容器：
+
+```sh
+docker compose exec ilinker ilinker auth reset-password
+```
+
+使用 `docker run --name ilinker` 部署时：
+
+```sh
+docker exec -it ilinker ilinker auth reset-password
+```
+
+服务已停止时，也可以通过 Compose 启动一次性 CLI 容器，自动挂载相同的数据卷（不要删除卷）：
+
+```sh
+docker compose run --rm --no-deps ilinker ilinker auth reset-password
+```
+
+Docker 内默认操作 `/app/data`，通常无需 `--data-dir`。交互输入需保留 TTY；自动化可加 `--password-stdin` 从管道读取一行密码，此时 Compose 使用 `exec -T` / `run -T`，`docker exec` 使用 `-i`。不要将明文密码写入命令参数或 shell 历史。
+
+该命令直接访问本机现有 SQLite 数据库，不调用 HTTP API；服务运行或停止时均可执行，不受 `ILINKER_URL` 影响，不支持 `--url`、`--session-file` 或修改用户名。只有具备数据目录读写权限的服务器 / 容器操作员才能使用，远程 CLI 不能执行密码恢复。
+数据库不存在或尚未创建管理员时会报错，不会新建数据库或账号。重置原子更新密码哈希并撤销全部 Web / CLI 会话；之后使用原账号、新密码重新登录。
+机器人配置、微信凭证、WebHook 地址 / Token、聊天会话、历史消息、发送队列和加密密钥保持不变，无需重新扫码绑定。原 CLI 登录状态文件可能仍保留旧凭证，但已无法使用，重新 `auth login` 即可更新。
+
 扫码超时或中断时，已创建的机器人会保留；使用输出的 ID 执行 `bot bind --id BOT_ID` 重试。
 重新扫码仍遵守“一个机器人固定绑定一个账号”的限制。更换接收账号时创建另一个机器人，再在 WebHook 配置中切换机器人。
+
+## 可选：Hako 扫码登录管理后台
+
+此功能用于登录 iLinker 管理后台，与微信机器人扫码绑定相互独立。密码登录、首次创建管理员和 `auth reset-password` 始终保留。
+需要同时升级支持第三方应用授权的 Hako 服务端和 iOS 客户端；手机的 Console 公钥须已登记并登录 Hako。第三方二维码使用 `hako://web-login?v=2`，旧版手机端会拒绝扫描。
+
+1. 用 Hako 手机扫码登录 Hako Web 管理后台，打开「应用管理 → 创建应用」。填写应用名称（例如 iLinker）和 iLinker 的实际 HTTPS 地址。
+2. Hako 自动生成应用 ID 和 SK，并显示可复制的 iLinker 环境配置。SK 仅在创建或轮换时显示一次；请直接保存到部署环境，不要发到聊天或提交到仓库。无需手工计算哈希或修改 Hako 的 `server.json`。
+3. 在 iLinker 的 `.env` / 部署环境中粘贴生成的配置，并设置对外地址：
+
+   ```dotenv
+   PUBLIC_ORIGIN=https://notify.example.com
+   HAKO_URL=https://hako.example.com
+   HAKO_CLIENT_ID=<Hako 生成的应用 ID>
+   HAKO_CLIENT_SECRET=<Hako 生成的 SK>
+   ```
+
+   本机和 Docker Compose 使用同一组变量。使用包含本次功能的新版本后重启；Compose 可执行 `docker compose up -d --force-recreate ilinker`。后端必须通过有效证书的 HTTPS 连接 Hako，不跟随重定向或忽略证书错误。
+4. 用原密码登录 iLinker，打开「系统设置 → Hako 扫码登录」，重新输入管理员密码，然后在 Hako「设置 → 扫码登录」扫描绑定二维码。核对应用、应用地址、绑定用途和六位确认码后批准。
+5. 退出后台后，登录页出现「密码登录 / Hako 扫码」两个入口。后续扫码只能登录已绑定身份对应的现有管理员，不会自动注册或按用户名匹配。
+
+应用和 SK 哈希持久保存在 Hako 加密数据库，重启后保留。Hako「应用管理」支持停用 / 启用及轮换 SK：停用立即撤销该应用的待登录请求和 Hako 授权，iLinker 在下一次授权校验时拒绝旧会话；重新启用不恢复旧请求或会话。轮换后旧 SK 立即失效，需将新 SK 更新到 iLinker 并重启，无需重新绑定同一 Hako 身份。SK 遗失时通过轮换恢复，不能查询旧 SK。
+
+应用密钥只在两端后端之间通过 HTTPS 使用，Hako 只保存 SHA-256 哈希；浏览器只能取得二维码、确认码及状态，无法取得应用密钥或兑换凭据。每次扫码 90 秒有效，刷新 / 取消使旧请求失效，授权只可兑换一次，并绑定发起浏览器的 HttpOnly Cookie。Hako 始终要求已登录手机明确批准，应用密钥本身不能批准登录。
+
+Hako 登录会话最长 12 小时，并受 Hako 的 30 分钟闲置期限及批准方 Console 会话约束。iLinker 每至多 60 秒重新校验一次正在使用的 Hako 授权（包括 SSE）；手机「已登录设备」可单独移除该应用会话。Hako 退出、撤销批准方或重启会在下一次校验时使授权失效。Hako 不可用时，成功校验缓存最多保留 60 秒，之后 Hako 会话暂停访问；密码登录不受影响。
+
+「解除 Hako 绑定」需要本地密码，只撤销 Hako 来源的 iLinker 会话及待登录请求。修改 / 重置本地密码会撤销全部 iLinker 登录及旧二维码，保留 Hako 身份绑定和业务数据。退出 iLinker 不会退出手机 Hako。两边数据目录都应备份；Hako 的稳定账号 ID 保存在加密数据库中，重建数据库后需解除旧绑定并重新绑定。更换 Hako 地址或应用密钥会使已有 Hako 登录失效。
 
 ## 接入微信
 
@@ -319,6 +387,9 @@ Token 只能查询由自身 WebHook 创建的消息。
 | `PUBLIC_ORIGIN` | 无 | 可选对外访问源，例如 `https://notify.example.com`；配置后严格校验后台请求来源 |
 | `COOKIE_SECURE` | 根据 PUBLIC_ORIGIN 推断 | HTTPS 部署使用 `true` |
 | `ENCRYPTION_KEY` | 自动生成并保存在数据目录 | 可选 Base64 编码的 32 字节密钥 |
+| `HAKO_URL` | 无 | Hako HTTPS 根地址 |
+| `HAKO_CLIENT_ID` | 无 | Hako 创建的应用 ID |
+| `HAKO_CLIENT_SECRET` | 无 | Hako 创建的 SK，三项须同时配置 |
 
 反向代理需转发 `/api/`、`/webhook/` 及静态资源；SSE 路径 `/api/v1/events` 应关闭缓冲。
 发送 Base64 图片时，反向代理请求体大小上限应至少设置为 12 MB。

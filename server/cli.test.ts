@@ -203,3 +203,30 @@ test('health endpoint is unauthenticated and contains no configuration or accoun
   const result = await fetch(`${f.url}/healthz`);
   assert.equal(result.status, 200); assert.deepEqual(await result.json(), { status: 'ok' });
 });
+
+test('local recovery on a live gateway invalidates browser and CLI sessions while preserving all business tables', async () => {
+  const f = await fixture(); await f.setup();
+  const session = JSON.parse(await readFile(join(f.dir, 'cli-session.json'), 'utf8')).cookie;
+  const browser = await f.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: 'cli-admin', password } });
+  const bot = (await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { cookie: session }, payload: { name: '保留机器人' } })).json<Bot>();
+  f.store.run("UPDATE bots SET credentials=?,base_url=?,account_id=?,peer_id=?,enabled=1,status='online' WHERE id=?", f.vault.seal('preserved-credential'), 'https://ilinkai.weixin.qq.com', 'preserved-account', 'preserved-peer', bot.id);
+  f.gateway.ingest(bot.id, { message_id: 'preserved-message', from_user_id: 'preserved-peer', context_token: 'preserved-context', message_type: 1, item_list: [{ type: 1, text_item: { text: '保留历史消息' } }] });
+  const hook = JSON.parse(await f.run('webhook', 'create', '--bot', bot.id, '--name', '保留 WebHook', '--json'));
+  const send = await f.app.inject({ method: 'POST', url: hook.path, headers: { 'idempotency-key': 'preserved-key' }, payload: { text: '保留发送队列' } });
+  assert.equal(send.statusCode, 202);
+  const tables = f.store.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('admins','sessions') ORDER BY name");
+  const snapshot = () => tables.map(({ name }) => [name, f.store.all(`SELECT * FROM "${name}" ORDER BY rowid`)]);
+  const before = snapshot(), key = await readFile(join(f.dir, 'encryption.key'));
+  const newPassword = 'recovered-live-password';
+  await runCli(['auth', 'reset-password', '--password-stdin'], { env: f.env, io: { ...f.io, passwordStdin: async () => newPassword } });
+  assert.deepEqual(snapshot(), before);
+  assert.deepEqual(await readFile(join(f.dir, 'encryption.key')), key);
+  assert.equal(f.vault.open(f.store.get<{ credentials: string }>('SELECT credentials FROM bots WHERE id=?', bot.id)!.credentials), 'preserved-credential');
+  for (const cookie of [session, `ilinker_session=${browser.cookies[0].value}`]) assert.equal((await f.app.inject({ url: '/api/v1/auth/me', headers: { cookie } })).statusCode, 401);
+  await assert.rejects(f.run('bot', 'list'), /登录已失效/);
+  assert.equal((await f.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: 'cli-admin', password } })).statusCode, 401);
+  assert.equal((await f.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username: 'cli-admin', password: newPassword } })).statusCode, 200);
+  const repeated = await f.app.inject({ method: 'POST', url: hook.path, headers: { 'idempotency-key': 'preserved-key' }, payload: { text: '保留发送队列' } });
+  assert.equal(repeated.statusCode, 202);
+  assert.equal(repeated.json().messageId, send.json().messageId);
+});

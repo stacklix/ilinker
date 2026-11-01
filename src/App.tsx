@@ -6,6 +6,7 @@ import type { Bot, Overview } from '../shared/types';
 import { BotsPage } from './Bots';
 import { MessagesPage } from './Messages';
 import { WebHooksPage } from './WebHooks';
+import { HakoScan, HakoSettings } from './HakoLogin';
 
 type Page = 'overview' | 'bots' | 'messages' | 'webhooks' | 'settings';
 export interface Route { page: Page; botId?: string }
@@ -18,6 +19,7 @@ function readRoute(): Route {
 export function App() {
   const [user, setUser] = useState<{ username: string } | null>(null);
   const [setup, setSetup] = useState(false), [booting, setBooting] = useState(true), [bootError, setBootError] = useState('');
+  const [hakoEnabled, setHakoEnabled] = useState(false);
   const [route, setRoute] = useState(readRoute);
   const [revision, setRevision] = useState(0), [toast, setToast] = useState(''), [live, setLive] = useState(false);
   const refresh = useCallback(() => setRevision(v => v + 1), []);
@@ -29,7 +31,7 @@ export function App() {
   const bootstrap = useCallback(async () => {
     setBooting(true); setBootError('');
     try {
-      const status = await api<{ setupRequired: boolean }>('/auth/status'); setSetup(status.setupRequired);
+      const status = await api<{ setupRequired: boolean; hakoEnabled: boolean }>('/auth/status'); setSetup(status.setupRequired); setHakoEnabled(status.hakoEnabled);
       if (!status.setupRequired) { try { setUser(await api('/auth/me')); } catch { setUser(null); } }
     } catch (error) { setBootError((error as Error).message); }
     setBooting(false);
@@ -49,7 +51,7 @@ export function App() {
   const bots = botsResource.data || [];
   if (booting) return <div className="boot"><Logo /><Loading /></div>;
   if (bootError) return <div className="boot"><Logo /><ErrorLine error={bootError} /><Button onClick={bootstrap}>重新连接</Button></div>;
-  if (!user) return <Auth setup={setup} onLogin={value => { setSetup(false); setUser(value); refresh(); }} />;
+  if (!user) return <Auth setup={setup} hakoEnabled={hakoEnabled} onLogin={value => { setSetup(false); setUser(value); refresh(); }} />;
   const titles: Record<Page, [string, string]> = {
     overview: ['工作台', '所有连接与消息，尽在掌握。'], bots: ['机器人管理', '连接你的微信，让通知开始流动。'],
     messages: ['消息中心', '按机器人查看会话和消息。'], webhooks: ['Webhooks', '一个地址，连接你的应用与消息。'], settings: ['系统设置', '管理你的账号与网关。'],
@@ -61,7 +63,7 @@ export function App() {
       ] as const).map(([key, Icon, label]) => <button key={key} aria-label={label} title={label} className={`nav-item ${route.page === key ? 'active' : ''}`} onClick={() => navigate(key)}><Icon size={19} /><span>{label}</span>{key === 'bots' && <small>{bots.length}</small>}{key === 'messages' && bots.reduce((n, b) => n + b.unread, 0) > 0 && <b className="nav-dot" />}</button>)}</nav>
       <div className="sidebar-bottom"><button className={`nav-item ${route.page === 'settings' ? 'active' : ''}`} onClick={() => navigate('settings')}><Settings size={19} />系统设置</button>
         <div className="sidebar-status"><span className={`live-dot ${live ? '' : 'muted'}`} /><span>{live ? '实时连接正常' : '正在恢复实时连接'}</span><span className="version">v0.1</span></div>
-        <div className="user-block"><span className="user-avatar">{user.username[0].toUpperCase()}</span><div><strong>{user.username}</strong><small>管理员</small></div><button className="icon-btn" title="退出登录" aria-label="退出登录" onClick={async () => { await post('/auth/logout'); setUser(null); }}><LogOut size={17} /></button></div>
+        <div className="user-block"><span className="user-avatar">{user.username[0].toUpperCase()}</span><div><strong>{user.username}</strong><small>管理员</small></div><button className="icon-btn" title="退出登录" aria-label="退出登录" onClick={async () => { await post('/auth/logout'); setUser(null); void bootstrap(); }}><LogOut size={17} /></button></div>
       </div>
     </aside>
     <main className={`main ${route.page === 'messages' ? 'main-chat' : ''}`}>
@@ -72,16 +74,17 @@ export function App() {
       {route.page === 'bots' && <BotsPage bots={bots} revision={revision} refresh={refresh} notify={notify} navigate={navigate} />}
       {route.page === 'messages' && <MessagesPage bots={bots} revision={revision} refresh={refresh} notify={notify} route={route} navigate={navigate} />}
       {route.page === 'webhooks' && <WebHooksPage bots={bots} revision={revision} refresh={refresh} notify={notify} navigate={navigate} />}
-      {route.page === 'settings' && <SettingsPage username={user.username} notify={notify} onLogout={() => setUser(null)} />}
+      {route.page === 'settings' && <SettingsPage username={user.username} notify={notify} onLogout={() => { setUser(null); void bootstrap(); }} />}
     </main>
     {toast && <div className="toast" role="status"><ShieldCheck size={18} />{toast}<button onClick={() => setToast('')} aria-label="关闭提示"><X size={15} /></button></div>}
   </div>;
 }
 function Logo() { return <div className="logo"><span><Link2 size={24} strokeWidth={2.6} /></span><strong>iLinker<span>通知网关</span></strong></div>; }
-function Auth({ setup, onLogin }: { setup: boolean; onLogin: (user: { username: string }) => void }) {
+function Auth({ setup, hakoEnabled, onLogin }: { setup: boolean; hakoEnabled: boolean; onLogin: (user: { username: string }) => void }) {
   const [username, setUsername] = useState(''), [password, setPassword] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<'password' | 'hako'>('password');
   async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault(); if (mode === 'hako') return; setBusy(true); setError('');
     try {
       if (setup) await post('/auth/setup', { username, password });
       onLogin(await post('/auth/login', { username, password }));
@@ -89,9 +92,10 @@ function Auth({ setup, onLogin }: { setup: boolean; onLogin: (user: { username: 
   }
   return <div className="auth-page"><div className="auth-decoration"><div className="auth-orbit orbit-one" /><div className="auth-orbit orbit-two" /><div className="auth-brand"><Logo /><div className="auth-pitch"><span className="pill"><Radio size={13} /> CONNECT YOUR WORLD</span><h1>让每一条通知，<br />找到它的目的地。</h1><p>连接机器人、查看会话、接入应用。<br />你的消息，在一个地方有序流动。</p><div className="auth-flow"><span><Command size={22} /></span><i /><span className="flow-center"><Link2 size={27} /></span><i /><span><MessageSquare size={22} /></span></div></div><small>iLinker · 你的私有通知网关</small></div></div>
     <div className="auth-form-wrap"><form className="auth-form" onSubmit={submit}><div className="auth-mark"><KeyRound size={23} /></div><h2>{setup ? '创建你的工作空间' : '欢迎回来'}</h2><p>{setup ? '首次使用，先设置一个管理员账号。' : '登录 iLinker，继续连接你的消息。'}</p>
-      <label>管理员账号<input required minLength={3} maxLength={40} value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" placeholder="输入管理员账号" /></label>
+      {!setup && hakoEnabled && <div className="tabs" aria-label="登录方式"><button type="button" className={mode === 'password' ? 'selected' : ''} onClick={() => setMode('password')}>密码登录</button><button type="button" className={mode === 'hako' ? 'selected' : ''} onClick={() => setMode('hako')}>Hako 扫码</button></div>}
+      {mode === 'hako' ? <HakoScan onComplete={onLogin} /> : <><label>管理员账号<input required minLength={3} maxLength={40} value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" placeholder="输入管理员账号" /></label>
       <label>密码<input required minLength={setup ? 10 : 1} maxLength={128} type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete={setup ? 'new-password' : 'current-password'} placeholder={setup ? '设置至少 10 位密码' : '输入密码'} /></label>
-      <ErrorLine error={error} /><Button type="submit" busy={busy} icon={ArrowRight}>{setup ? '创建并进入后台' : '登录后台'}</Button><div className="auth-note"><ShieldCheck size={14} />凭证加密保存，数据由你掌控</div>
+      <ErrorLine error={error} /><Button type="submit" busy={busy} icon={ArrowRight}>{setup ? '创建并进入后台' : '登录后台'}</Button></>}<div className="auth-note"><ShieldCheck size={14} />凭证加密保存，数据由你掌控</div>
     </form></div></div>;
 }
 function OverviewPage({ bots, revision, navigate }: { bots: Bot[]; revision: number; navigate: Navigate }) {
@@ -119,7 +123,7 @@ function OverviewPage({ bots, revision, navigate }: { bots: Bot[]; revision: num
 }
 function SettingsPage({ username, notify, onLogout }: { username: string; notify: (message: string) => void; onLogout: () => void }) {
   const [currentPassword, setCurrent] = useState(''), [newPassword, setNew] = useState(''), [confirm, setConfirm] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false);
-  return <div className="page-content settings-content"><section className="panel"><div className="panel-header"><div><h2>账号安全</h2><p>当前管理员：{username}</p></div><ShieldCheck size={21} className="accent" /></div><form className="settings-form" onSubmit={async e => { e.preventDefault(); if (newPassword !== confirm) { setError('两次输入的新密码不一致'); return; } setBusy(true); setError(''); try { await patch('/auth/password', { currentPassword, newPassword }); notify('密码已更新，请重新登录'); onLogout(); } catch (error) { setError((error as Error).message); } finally { setBusy(false); } }}><label>当前密码<input required type="password" autoComplete="current-password" value={currentPassword} onChange={e => setCurrent(e.target.value)} /></label><label>新密码<input required type="password" minLength={10} maxLength={128} autoComplete="new-password" value={newPassword} onChange={e => setNew(e.target.value)} placeholder="至少 10 位" /></label><label>确认新密码<input required type="password" minLength={10} maxLength={128} autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} /></label><ErrorLine error={error} /><Button busy={busy} type="submit" icon={KeyRound}>更新密码</Button></form></section>
+  return <div className="page-content settings-content"><HakoSettings notify={notify} /><section className="panel"><div className="panel-header"><div><h2>账号安全</h2><p>当前管理员：{username}</p></div><ShieldCheck size={21} className="accent" /></div><form className="settings-form" onSubmit={async e => { e.preventDefault(); if (newPassword !== confirm) { setError('两次输入的新密码不一致'); return; } setBusy(true); setError(''); try { await patch('/auth/password', { currentPassword, newPassword }); notify('密码已更新，请重新登录'); onLogout(); } catch (error) { setError((error as Error).message); } finally { setBusy(false); } }}><label>当前密码<input required type="password" autoComplete="current-password" value={currentPassword} onChange={e => setCurrent(e.target.value)} /></label><label>新密码<input required type="password" minLength={10} maxLength={128} autoComplete="new-password" value={newPassword} onChange={e => setNew(e.target.value)} placeholder="至少 10 位" /></label><label>确认新密码<input required type="password" minLength={10} maxLength={128} autoComplete="new-password" value={confirm} onChange={e => setConfirm(e.target.value)} /></label><ErrorLine error={error} /><Button busy={busy} type="submit" icon={KeyRound}>更新密码</Button></form></section>
     <section className="panel"><div className="panel-header"><div><h2>关于网关</h2><p>iLinker v0.1.0</p></div><CircleHelp size={20} className="quiet" /></div><div className="about-lines"><div><span>当前平台</span><strong>微信 iLink · 文本收发 / Webhooks 图片</strong></div><div><span>数据存储</span><strong>本地 SQLite</strong></div><div><span>Webhooks 认证</span><code>/webhook/message/&#123;token&#125;</code></div><div><span>历史消息</span><strong>自网关接入后保存</strong></div><p>首次建立会话，请在微信中给已连接的机器人发送一条消息。Webhooks 支持发送图片；收到的图片、语音、文件和视频当前显示消息摘要。</p></div></section>
   </div>;
 }

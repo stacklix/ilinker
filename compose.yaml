@@ -12,6 +12,9 @@ services:
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
       COOKIE_SECURE: "${COOKIE_SECURE:-}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY:-}"
+      HAKO_URL: "${HAKO_URL:-}"
+      HAKO_CLIENT_ID: "${HAKO_CLIENT_ID:-}"
+      HAKO_CLIENT_SECRET: "${HAKO_CLIENT_SECRET:-}"
     volumes:
       - ilinker-data:/app/data
     stop_grace_period: 30s

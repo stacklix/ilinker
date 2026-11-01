@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { SQLInputValue } from 'node:sqlite';
 import { createApp } from './app.js';
 import { toConversation } from './store.js';
 import { PlatformError, type PlatformAdapter, type IncomingMessage, type Credentials, type LoginResult } from './ilink.js';
@@ -74,7 +75,7 @@ async function eventually(check: () => boolean, timeout = 4000) {
 
 test('first-run setup is one-time; passwords and sessions are not stored as plaintext', async () => {
   const f = await fixture(); f.store.run('DELETE FROM admins');
-  assert.deepEqual((await f.app.inject('/api/v1/auth/status')).json(), { setupRequired: true });
+  assert.deepEqual((await f.app.inject('/api/v1/auth/status')).json(), { setupRequired: true, hakoEnabled: false });
   const setup = await f.app.inject({ method: 'POST', url: '/api/v1/auth/setup', payload: { username: 'owner', password: 'very-good-password' } });
   assert.equal(setup.statusCode, 201);
   assert.equal((await f.app.inject({ method: 'POST', url: '/api/v1/auth/setup', payload: { username: 'other', password: 'another-password' } })).statusCode, 409);
@@ -91,6 +92,39 @@ test('protected routes require login and cross-origin writes are rejected', asyn
   assert.equal((await f.app.inject({ method: 'POST', url: '/api/v1/bots', headers: { ...f.headers, origin: 'https://attacker.example' }, payload: { name: 'bad' } })).statusCode, 403);
   assert.equal((await f.request('POST', '/api/v1/auth/logout')).statusCode, 200);
   assert.equal((await f.request('GET', '/api/v1/auth/me')).statusCode, 401);
+});
+
+test('password recovery prevents in-flight old-password logins or changes from surviving the reset', { timeout: 10_000 }, async () => {
+  for (const changePassword of [false, true]) {
+    const f = await fixture();
+    const recoveredHash = await passwordHash('recovered-admin-password');
+    let onRead!: () => void;
+    const readStarted = new Promise<void>(resolve => { onRead = resolve; });
+    const get = f.store.get.bind(f.store);
+    const target = changePassword ? 'SELECT password_hash FROM admins WHERE id=1' : 'SELECT * FROM admins WHERE id=1';
+    f.store.get = ((sql: string, ...params: SQLInputValue[]) => {
+      const result = get(sql, ...params);
+      if (sql === target) onRead();
+      return result;
+    }) as typeof f.store.get;
+    const pending = f.app.inject(changePassword ? {
+      method: 'PATCH', url: '/api/v1/auth/password', headers: f.headers,
+      payload: { currentPassword: 'correct-password-123', newPassword: 'must-not-overwrite-recovery' },
+    } : {
+      method: 'POST', url: '/api/v1/auth/login',
+      payload: { username: 'admin', password: 'correct-password-123' },
+    }).then(response => response);
+    await readStarted;
+    f.store.get = get;
+    // Recovery commits while the request is awaiting asynchronous password derivation.
+    f.store.transaction(() => {
+      f.store.run('UPDATE admins SET password_hash=? WHERE id=1', recoveredHash);
+      f.store.run('DELETE FROM sessions');
+    });
+    assert.equal((await pending).statusCode, changePassword ? 400 : 401);
+    assert.equal(f.store.get<{ password_hash: string }>('SELECT password_hash FROM admins WHERE id=1')!.password_hash, recoveredHash);
+    assert.equal(f.store.all('SELECT * FROM sessions').length, 0);
+  }
 });
 test('same-origin browser requests support setup and login behind an HTTPS proxy without a public origin', async () => {
   const f = await fixture(); f.store.run('DELETE FROM admins');

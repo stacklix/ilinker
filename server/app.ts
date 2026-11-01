@@ -12,6 +12,7 @@ import { WechatAdapter, PlatformError, type PlatformAdapter } from './ilink.js';
 import type { WebHookMessage, WebHookMessagePage, Message, Overview } from '../shared/types.js';
 import { IMAGE_BODY_LIMIT, notificationFingerprint, notificationSummary, parseNotification, type ImageDownloader } from './images.js';
 import { SEND_WINDOW_CODE, SEND_WINDOW_MESSAGE } from './send-window.js';
+import { HakoAuth, type HakoConfig } from './hako.js';
 
 const name = z.string().trim().min(1).max(80);
 const textBody = z.object({ text: z.string().trim().min(1, '消息不能为空').max(4000, '消息最多 4000 个字符') });
@@ -24,6 +25,7 @@ export interface AppOptions {
   dataDir: string; encryptionKey?: string; publicOrigin?: string; cookieSecure?: boolean; localCliToken?: string;
   logger?: false | Pick<FastifyLoggerOptions, 'stream'>;
   adapter?: PlatformAdapter; startWorkers?: boolean; webDir?: string; imageDownloader?: ImageDownloader;
+  hako?: HakoConfig; hakoFetch?: typeof fetch;
 }
 
 export async function createApp(options: AppOptions) {
@@ -43,6 +45,7 @@ export async function createApp(options: AppOptions) {
   const vault = new Vault(options.dataDir, options.encryptionKey);
   const gateway = new Gateway(store, vault, options.adapter || new WechatAdapter(), options.imageDownloader);
   const publicOrigin = options.publicOrigin ? new URL(options.publicOrigin).origin : undefined;
+  const hako = new HakoAuth(store, vault, options.hako, options.hakoFetch, options.cookieSecure ?? publicOrigin?.startsWith('https:') ?? false);
   await app.register(cookie);
   await app.register(rateLimit, { global: false, max: 10, timeWindow: '1 minute', errorResponseBuilder: () => ({ code: 'RATE_LIMITED', message: '请求过于频繁，请稍后重试' }) });
 
@@ -63,6 +66,7 @@ export async function createApp(options: AppOptions) {
     return webhook;
   };
   const sessionValid = (raw?: string) => !!raw && !!store.get('SELECT hash FROM sessions WHERE hash=? AND expires_at>?', hashToken(raw), Date.now());
+  const authenticated = async (raw?: string) => sessionValid(raw) && await hako.valid(raw!) && sessionValid(raw);
   app.addHook('onRequest', async (request, reply) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'no-referrer');
@@ -82,13 +86,14 @@ export async function createApp(options: AppOptions) {
       }
     }
     const publicPaths = ['/api/v1/auth/status', '/api/v1/auth/setup', '/api/v1/auth/login'];
+    const hakoPublic = path === '/api/v1/auth/hako/requests' || /^\/api\/v1\/auth\/hako\/requests\/[A-Za-z0-9_-]{43}(\/complete)?$/.test(path);
     const localCli = options.localCliToken &&
       ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(request.ip) &&
       !request.headers.origin && !request.headers['sec-fetch-site'] &&
       /^\/api\/v1\/(bots|webhooks)(\/|$)/.test(path) &&
       typeof request.headers['x-ilinker-local-cli'] === 'string' &&
       hashToken(request.headers['x-ilinker-local-cli']) === hashToken(options.localCliToken);
-    if (!publicPaths.includes(path) && !localCli && !sessionValid(request.cookies[COOKIE])) throw new AppError(401, 'UNAUTHENTICATED', '请先登录后台');
+    if (!publicPaths.includes(path) && !hakoPublic && !localCli && !await authenticated(request.cookies[COOKIE])) throw new AppError(401, 'UNAUTHENTICATED', '请先登录后台');
   });
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ code: 'VALIDATION_ERROR', message: error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；') });
@@ -103,7 +108,8 @@ export async function createApp(options: AppOptions) {
   });
 
   app.get('/healthz', async () => { store.get('SELECT 1'); return { status: 'ok' }; });
-  app.get('/api/v1/auth/status', async () => ({ setupRequired: !store.get('SELECT id FROM admins WHERE id=1') }));
+  app.get('/api/v1/auth/status', async () => ({ setupRequired: !store.get('SELECT id FROM admins WHERE id=1'), hakoEnabled: hako.enabled() }));
+  hako.register(app);
   app.post('/api/v1/auth/setup', { config: { rateLimit: { max: 5 } } }, async (request, reply) => {
     if (store.get('SELECT id FROM admins WHERE id=1')) throw new AppError(409, 'ALREADY_INITIALIZED', '管理员已经初始化');
     const body = accountBody.parse(request.body);
@@ -121,13 +127,19 @@ export async function createApp(options: AppOptions) {
     const valid = await passwordMatches(body.password, encoded);
     if (!admin || admin.username !== body.username || !valid) throw new AppError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
     const token = newToken();
-    store.run('DELETE FROM sessions WHERE expires_at<?', Date.now());
-    store.run('INSERT INTO sessions VALUES (?,?)', hashToken(token), Date.now() + SESSION_MS);
+    store.transaction(() => {
+      // Local recovery may change the password while asynchronous scrypt is running.
+      const current = store.get<{ username: string; password_hash: string }>('SELECT * FROM admins WHERE id=1');
+      if (current?.username !== admin.username || current.password_hash !== encoded) throw new AppError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
+      store.run('DELETE FROM sessions WHERE expires_at<?', Date.now());
+      store.run('INSERT INTO sessions VALUES (?,?)', hashToken(token), Date.now() + SESSION_MS);
+    });
     reply.setCookie(COOKIE, token, { path: '/', httpOnly: true, sameSite: 'strict', secure: options.cookieSecure ?? publicOrigin?.startsWith('https:') ?? false, maxAge: SESSION_MS / 1000 });
     return { username: admin.username };
   });
   app.get('/api/v1/auth/me', async () => store.get<{ username: string }>('SELECT username FROM admins WHERE id=1'));
   app.post('/api/v1/auth/logout', async (request, reply) => {
+    await hako.revoke(request.cookies[COOKIE]);
     if (request.cookies[COOKIE]) store.run('DELETE FROM sessions WHERE hash=?', hashToken(request.cookies[COOKIE]));
     reply.clearCookie(COOKIE, { path: '/' }); return { ok: true };
   });
@@ -136,7 +148,10 @@ export async function createApp(options: AppOptions) {
     const admin = store.get<{ password_hash: string }>('SELECT password_hash FROM admins WHERE id=1')!;
     if (!await passwordMatches(body.currentPassword, admin.password_hash)) throw new AppError(400, 'INVALID_PASSWORD', '当前密码不正确');
     const encoded = await passwordHash(body.newPassword);
-    store.transaction(() => { store.run('UPDATE admins SET password_hash=? WHERE id=1', encoded); store.run('DELETE FROM sessions'); });
+    store.transaction(() => {
+      if (store.get<{ password_hash: string }>('SELECT password_hash FROM admins WHERE id=1')?.password_hash !== admin.password_hash) throw new AppError(400, 'INVALID_PASSWORD', '密码已更改，请重新登录');
+      store.run('UPDATE admins SET password_hash=? WHERE id=1', encoded); store.run('DELETE FROM sessions');
+    });
     reply.clearCookie(COOKIE, { path: '/' }); return { ok: true };
   });
 
@@ -389,10 +404,12 @@ export async function createApp(options: AppOptions) {
   app.get('/api/v1/events', async (request, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', 'X-Content-Type-Options': 'nosniff' });
-    const write = (data: unknown) => { if (!reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(data)}\n\n`); };
-    write({ connected: true });
+    const write = (data: unknown) => {
+      void authenticated(request.cookies[COOKIE]).then(valid => { if (!valid) close(); else if (!reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(data)}\n\n`); }).catch(close);
+    };
     const close = () => { if (!reply.raw.destroyed) reply.raw.end(); };
-    const heartbeat = setInterval(() => { if (!sessionValid(request.cookies[COOKIE])) close(); else if (!reply.raw.destroyed) reply.raw.write(': heartbeat\n\n'); }, 20_000);
+    write({ connected: true });
+    const heartbeat = setInterval(() => { void authenticated(request.cookies[COOKIE]).then(valid => { if (!valid) close(); else if (!reply.raw.destroyed) reply.raw.write(': heartbeat\n\n'); }).catch(close); }, 20_000);
     heartbeat.unref();
     gateway.events.on('change', write); gateway.events.on('shutdown', close);
     reply.raw.on('close', () => { clearInterval(heartbeat); gateway.events.off('change', write); gateway.events.off('shutdown', close); });

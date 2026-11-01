@@ -19,3 +19,5 @@
 
 .bot-rail{width:240px}.bot-rail-item>span:nth-child(2){display:block;min-width:0;flex:1}.bot-rail-item strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bot-rail-item small{display:block}.bot-rail-item{gap:10px}.chat-area>.error-line{flex-shrink:0}
 @media(max-width:600px){.bot-rail{width:100%;padding:20px 12px}.bot-rail-item{width:100%}.bot-rail-item>span:nth-child(2){display:block}.bot-rail-icon{width:32px}.rail-label{display:flex}.rail-manage{display:flex}.has-bot .bot-rail{display:none}.has-bot .chat-area{display:flex;width:100%}.chat-back{display:flex}}
+
+.hako-scan{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:12px 0}.hako-scan img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px}.hako-code{font-size:30px;letter-spacing:6px;font-variant-numeric:tabular-nums}.hako-settings-form{display:flex;flex-direction:column;gap:18px;max-width:420px}.hako-settings-form .btn{align-self:flex-start}
